@@ -1,186 +1,221 @@
-import './style.css'
-import * as THREE from 'three'
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+// Gerekli Three.js Kütüphanelerini İçe Aktarma
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+// Kendi utils dosyanızdan import edilen VR yardımcıları
+import { VRButton } from './utils/VRButton.js';
+import { XRControllerModelFactory } from './utils/XRControllerModelFactory.js';
 
-let scene, camera, renderer, controls
-let snowParticles
-let leftEye, rightEye, nose
-let blinkTimer = 0
-let mouse = new THREE.Vector2(0, 0)
 
-init()
-animate()
+// --- SAHNE KURULUMU ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x505050);
 
-function init() {
-  // Scene
-  scene = new THREE.Scene()
-  scene.background = new THREE.Color(0x87ceeb)
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 1.6, 3); // VR başlangıç pozisyonu
 
-  // Camera
-  camera = new THREE.PerspectiveCamera(
-    60,
-    window.innerWidth / window.innerHeight,
-    0.1,
-    1000
-  )
-  camera.position.set(0, 3, 8)
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
 
-  // Renderer
-  renderer = new THREE.WebGLRenderer({ antialias: true })
-  renderer.setSize(window.innerWidth, window.innerHeight)
-  document.getElementById('app').appendChild(renderer.domElement)
+// --- VR (WebXR) Etkinleştirme ---
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
 
-  // Lights
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.5)
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8)
-  dirLight.position.set(5, 10, 7)
-  const hemiLight = new THREE.HemisphereLight(0xffffbb, 0x080820, 0.6)
-  scene.add(ambientLight, dirLight, hemiLight)
+// Işıklar
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+dirLight.position.set(0, 5, 2);
+scene.add(dirLight);
 
-  // Axis helper
-  scene.add(new THREE.AxesHelper(5))
+// Zemin
+const floorGeometry = new THREE.PlaneGeometry(10, 10);
+floorGeometry.rotateX(- Math.PI / 2);
+const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+scene.add(floor);
 
-  // Ground
-  const groundGeo = new THREE.PlaneGeometry(20, 20)
-  const groundMat = new THREE.MeshPhongMaterial({ color: 0xffffff })
-  const ground = new THREE.Mesh(groundGeo, groundMat)
-  ground.rotation.x = -Math.PI / 2
-  scene.add(ground)
 
-  // Materials
-  const bodyMat = new THREE.MeshPhongMaterial({ color: 0xf2f2f2 })
-  const eyeMat = new THREE.MeshPhongMaterial({ color: 0x000000 })
-  const noseMat = new THREE.MeshPhongMaterial({ color: 0xff6600 })
-  const hatMat = new THREE.MeshPhongMaterial({ color: 0x111111 })
-  const scarfMat = new THREE.MeshPhongMaterial({ color: 0xff0000 })
-  const buttonMat = new THREE.MeshPhongMaterial({ color: 0x333333 })
+// --- KONTROL VE ETKİLEŞİM NESNELERİ ---
+let grabObjects = []; // Yakalanabilir nesneler listesi
 
-  // Body
-  const bottom = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 32), bodyMat)
-  bottom.position.set(0, 1, 0)
-  scene.add(bottom)
+// Modelleri Yükle ve Yakalanabilir Yap
+const loader = new GLTFLoader();
+loader.load('public/model/RobotExpressive.glb', function (gltf) {
+    const model = gltf.scene;
+    model.position.set(0, 1, -1);
+    model.scale.set(0.5, 0.5, 0.5);
+    scene.add(model);
+    grabObjects.push(model);
 
-  const middle = new THREE.Mesh(new THREE.SphereGeometry(0.7, 32, 32), bodyMat)
-  middle.position.set(0, 2.3, 0)
-  scene.add(middle)
+    // Test amaçlı ek bir küp (Kendi modeliniz)
+    const box = new THREE.Mesh(
+        new THREE.BoxGeometry(0.3, 0.3, 0.3),
+        new THREE.MeshStandardMaterial({ color: 0xff0000 })
+    );
+    box.position.set(1, 1.2, -1.5);
+    scene.add(box);
+    grabObjects.push(box);
+});
 
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.5, 32, 32), bodyMat)
-  head.position.set(0, 3.3, 0)
-  scene.add(head)
+// --- VR KONTROLCÜLERİ VE RAYCASTING ---
+const raycaster = new THREE.Raycaster();
+const tempMatrix = new THREE.Matrix4();
+let intersected = []; // Vurgulanan nesneler listesi
 
-  // Eyes
-  leftEye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 16, 16), eyeMat)
-  leftEye.position.set(-0.15, 3.35, 0.45)
-  rightEye = leftEye.clone()
-  rightEye.position.x = 0.15
-  scene.add(leftEye, rightEye)
+const controllerModelFactory = new XRControllerModelFactory();
 
-  // Nose
-  nose = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.4, 16), noseMat)
-  nose.rotation.x = Math.PI / 2
-  nose.position.set(0, 3.3, 0.55)
-  scene.add(nose)
+// Görsel Işınlar için temel geometri ve materyal
+const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -1)
+]);
+const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 3 });
 
-  // Buttons
-  for (let i = 0; i < 3; i++) {
-    const button = new THREE.Mesh(new THREE.SphereGeometry(0.06, 16, 16), buttonMat)
-    button.position.set(0, 2.1 - i * 0.4, 0.68)
-    scene.add(button)
-  }
 
-  // Scarf
-  const scarf = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.08, 12, 24), scarfMat)
-  scarf.rotation.x = Math.PI / 2
-  scarf.position.set(0, 2.9, 0)
-  scene.add(scarf)
+// KONTROLCÜ 1 (SOL EL)
+const controller1 = renderer.xr.getController(0);
+controller1.addEventListener('selectstart', onSelectStart);
+controller1.addEventListener('selectend', onSelectEnd);
+scene.add(controller1);
 
-  // Hat
-  const hatBase = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.1, 24), hatMat)
-  hatBase.position.set(0, 3.6, 0)
-  const hatTop = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.6, 24), hatMat)
-  hatTop.position.set(0, 3.95, 0)
-  scene.add(hatBase, hatTop)
+const controllerGrip1 = renderer.xr.getControllerGrip(0);
+controllerGrip1.add(controllerModelFactory.createControllerModel(controllerGrip1));
+scene.add(controllerGrip1);
 
-  // Orbit controls
-  controls = new OrbitControls(camera, renderer.domElement)
-  controls.target.set(0, 2, 0)
-  controls.enableDamping = true
+const line1 = new THREE.Line(lineGeometry, lineMaterial);
+line1.scale.z = 5;
+controller1.add(line1); // Kontrolcü 1'e çizgiyi ekle
 
-  // Snow
-  createSnow()
 
-  // Mouse hareketini dinle
-  window.addEventListener('mousemove', onMouseMove)
-  window.addEventListener('resize', onWindowResize)
-}
+// KONTROLCÜ 2 (SAĞ EL)
+const controller2 = renderer.xr.getController(1);
+controller2.addEventListener('selectstart', onSelectStart);
+controller2.addEventListener('selectend', onSelectEnd);
+scene.add(controller2);
 
-// ❄️ Snow Particles
-function createSnow() {
-  const snowCount = 1000
-  const positions = new Float32Array(snowCount * 3)
-  for (let i = 0; i < snowCount; i++) {
-    positions[i * 3] = (Math.random() - 0.5) * 20
-    positions[i * 3 + 1] = Math.random() * 10 + 2
-    positions[i * 3 + 2] = (Math.random() - 0.5) * 20
-  }
+const controllerGrip2 = renderer.xr.getControllerGrip(1);
+controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
+scene.add(controllerGrip2);
 
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+const line2 = new THREE.Line(lineGeometry, lineMaterial);
+line2.scale.z = 5;
+controller2.add(line2); // Kontrolcü 2'ye çizgiyi ekle
 
-  const material = new THREE.PointsMaterial({
-    color: 0xffffff,
-    size: 0.08,
-    transparent: true,
-    opacity: 0.9
-  })
 
-  snowParticles = new THREE.Points(geometry, material)
-  scene.add(snowParticles)
-}
+// ------------------------------------
+// YAKALAMA MANTIĞI FONKSİYONLARI
+// ------------------------------------
 
-// 🖱️ Fare hareketi — normalize edilmiş koordinatlar
-function onMouseMove(event) {
-  mouse.x = (event.clientX / window.innerWidth) * 2 - 1
-  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1
-}
+function onSelectStart(event) {
+    const controller = event.target;
+    const intersections = getIntersections(controller);
 
-// 🎬 Animate
-function animate() {
-  requestAnimationFrame(animate)
-  controls.update()
+    if (intersections.length > 0) {
+        let object = intersections[0].object;
 
-  // Kar düşüşü
-  if (snowParticles) {
-    const pos = snowParticles.geometry.attributes.position
-    for (let i = 0; i < pos.count; i++) {
-      pos.array[i * 3 + 1] -= 0.03
-      if (pos.array[i * 3 + 1] < 0) pos.array[i * 3 + 1] = 10 + Math.random() * 2
+        // Yakalanabilir en üst seviye nesneyi bul (GLTF Modelleri için gerekli)
+        while (object.parent !== scene && object.parent !== controller && object.parent) {
+             // Eğer bu üst nesne yakalanabilir listemizdeyse dur
+            if (grabObjects.includes(object)) break;
+            object = object.parent;
+        }
+
+        // Nesneyi kontrolcüye bağla (Yakalama)
+        controller.attach(object);
+        controller.userData.selected = object; // Yakalanan nesneyi kaydet
     }
-    pos.needsUpdate = true
-  }
-
-  // 👁️ Göz kırpma
-  blinkTimer += 0.05
-  const blink = Math.abs(Math.sin(blinkTimer * 0.5))
-  const scaleY = THREE.MathUtils.lerp(0.2, 1, blink)
-  leftEye.scale.set(1, scaleY, 1)
-  rightEye.scale.set(1, scaleY, 1)
-
-  // 🥕 Burun dönüyor
-  nose.rotation.z += 0.02
-
-  // 👀 Gözler fareyi izliyor
-  const lookX = THREE.MathUtils.clamp(mouse.x * 0.3, -0.2, 0.2)
-  const lookY = THREE.MathUtils.clamp(mouse.y * 0.3, -0.1, 0.2)
-  leftEye.position.set(-0.15 + lookX, 3.35 + lookY, 0.45)
-  rightEye.position.set(0.15 + lookX, 3.35 + lookY, 0.45)
-
-  renderer.render(scene, camera)
 }
 
-// 📏 Resize
-function onWindowResize() {
-  camera.aspect = window.innerWidth / window.innerHeight
-  camera.updateProjectionMatrix()
-  renderer.setSize(window.innerWidth, window.innerHeight)
+function onSelectEnd(event) {
+    const controller = event.target;
+
+    if (controller.userData.selected !== undefined) {
+        const object = controller.userData.selected;
+
+        // Nesneyi ana sahneye geri bağla (Bırakma)
+        scene.attach(object);
+        controller.userData.selected = undefined;
+    }
 }
+
+function getIntersections(controller) {
+    // Kumandanın matrisini kullanarak Raycaster'ı ayarla
+    tempMatrix.identity().extractRotation(controller.matrixWorld);
+    raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+    raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix); // -Z yönü
+
+    // Yakalanabilir nesnelerle kesişimleri bul
+    return raycaster.intersectObjects(grabObjects, true); // true, alt nesneleri de kontrol eder
+}
+
+// ------------------------------------
+// ANIMATION DÖNGÜSÜ VE VURGULAMA
+// ------------------------------------
+
+function handleController(controller) {
+    // İlk çocuk nesnenin ışın olduğunu varsayıyoruz
+    const line = controller.children[0];
+    const defaultColor = new THREE.Color(0xffffff);
+
+    // Geçici olarak vurgulanan nesnenin vurgulamasını kaldır
+    if (intersected.length > 0) {
+        const object = intersected[0];
+        if (object.material && object.material.emissive) {
+            object.material.emissive.setHex(0x000000); // Emissiv rengi sıfırla
+        }
+        intersected.splice(0, 1);
+    }
+    line.scale.z = 5; // Varsayılan ışın uzunluğu
+
+    if (controller.userData.selected === undefined) {
+        // Nesne yakalanmamışsa ışın kontrolü yap
+        const intersections = getIntersections(controller);
+
+        if (intersections.length > 0) {
+            const intersection = intersections[0];
+            let object = intersection.object;
+
+            // En üst seviye yakalanabilir nesneyi bul
+            while (object.parent !== scene && object.parent !== controller && object.parent) {
+                if (grabObjects.includes(object)) break;
+                object = object.parent;
+            }
+
+            // Vurgulama
+            if (object.material && object.material.emissive) {
+                object.material.emissive.setHex(0xaaaaaa);
+                intersected.push(object);
+            }
+
+            // Işın uzunluğunu çarpma noktasına kadar kısalt
+            line.scale.z = intersection.distance;
+
+            // Çarptığında ışın rengini değiştir (Yeşil)
+            line.material.color.setHex(0x00ff00);
+        } else {
+            // Çarpma yoksa rengi varsayılana döndür
+            line.material.color.copy(defaultColor);
+        }
+    }
+}
+
+function animate() {
+    renderer.setAnimationLoop(() => {
+        // Kontrolcülerin durumunu her döngüde güncelle
+        handleController(controller1);
+        handleController(controller2);
+
+        renderer.render(scene, camera);
+    });
+}
+
+animate();
+
+// Pencere boyutunu otomatik ayarlama
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
